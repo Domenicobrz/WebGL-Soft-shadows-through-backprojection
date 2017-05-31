@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title></title>
+
+
+    <script src='libs/dat.gui.min.js'></script>
+    <script src='libs/camera_v1.05.js'></script>
+    <script src='libs/gl-matrix-min.js'></script>
+    <script src='libs/shader.js'></script>
+    <script src='libs/postProcess.js'></script>
+    <script src='libs/light.js'></script>
+    <script src='libs/scene.js'></script>
+    <script src='libs/main.js'></script>
+
+
+    <script type="vert" id="mainv">
+        attribute vec3 pos;
+        attribute vec3 normal;
+
+        uniform mat4 projection;
+        uniform mat4 model;
+        uniform mat4 view;
+
+        uniform mat4 lightviewproj;
+
+        varying vec3 Normal;
+        varying vec3 FragPos;
+        varying vec4 FragPosLightSpaceNC;
+
+        void main() {
+            gl_Position = projection * view * model * vec4(pos, 1.0);
+            Normal = normalize((model * vec4(normal, 0.0)).xyz);
+            FragPos = pos;
+
+            FragPosLightSpaceNC = lightviewproj * vec4(pos, 1.0);
+        }
+    </script>
+
+    <script type="frag" id="mainf">
+        precision highp float;
+
+        varying vec3 Normal;
+        varying vec3 FragPos;
+        varying vec4 FragPosLightSpaceNC;
+
+        uniform vec3 lightPos;
+        uniform sampler2D lightmap;
+        uniform float lightmapFarPlaneSize;
+        uniform float lightmapRes;
+
+        uniform vec2 nearFarPlane;
+
+
+        uniform float debug;
+
+        uniform float searchTexelSpread;
+        uniform float lightSize;
+
+
+
+        float ShadowCalculation(vec4 fragPosLightSpace, in vec3 lightDir, in vec3 normal) {
+            //  As the clip-space FragPosLightSpace is not passed to the fragment shader 
+            //  via *****gl_Position***** we have to do this perspective divide ourselves: 
+            vec3 lNDC = fragPosLightSpace.xyz / fragPosLightSpace.w;
+
+            // range to 0...1
+            lNDC = lNDC * 0.5 + 0.5;
+
+            // clamping borders. To avoid that we should set clamp mode to border and set 1 to the clamp mode
+            if(lNDC.x > 1.0 || lNDC.x < 0.0 || lNDC.y > 1.0 || lNDC.y < 0.0)
+                return 1.0;
+
+
+            
+
+
+
+
+
+            float visibility = 1.0;
+
+            float oneTexelSize  = 1.0 / lightmapRes;
+            float halfTexelSize = oneTexelSize * 0.5;
+            float oneFarPlaneTexelSize = lightmapFarPlaneSize / lightmapRes;
+            vec2 ndcCurrentFragmentLightmapTexel = lNDC.xy * 2.0 - 1.0;
+            float lightSizeScale = 1.0 / lightSize;
+            float near_plane = nearFarPlane.x;
+            float far_plane  = nearFarPlane.y;
+
+            // first we need to linearize this depth 
+            float z = lNDC.z * 2.0 - 1.0; // range -1...1
+            float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.001); 
+            z -= bias;
+            float zlinearized =  
+                        ((2.0 * near_plane * far_plane) / (far_plane + near_plane - z * (far_plane - near_plane))) / far_plane;
+
+            // lightmapNearPlaneSize
+            for(int i = -10; i < 10; i++)
+            for(int j = -10; j < 10; j++) {
+
+                float sampleTexX = lNDC.x + oneTexelSize * searchTexelSpread * float(i);
+                float sampleTexY = lNDC.y + oneTexelSize * searchTexelSpread * float(j);
+
+                vec2 sampleCoords = vec2(sampleTexX, sampleTexY);
+
+                float zs = texture2D(lightmap, sampleCoords).r * 2.0 - 1.0;
+                float zslinearized = 
+                        ((2.0 * near_plane * far_plane) / (far_plane + near_plane - zs * (far_plane - near_plane))) / far_plane;
+
+                // not an occluder
+                if(zslinearized > zlinearized) continue;
+                // DEBUG: IF NOT AN OCCLUDER DECREASE VISIBILITY visibility -= 0.05;
+
+
+
+                // // (fw / r ) * zs
+                // float thisSampleZPlaneTexelSize = oneFarPlaneTexelSize * zslinearized;
+                float thisSampleZPlaneSize = lightmapFarPlaneSize * zslinearized;
+
+                vec2 ndcNextFragmentLightmapTexel = sampleCoords * 2.0 - 1.0;
+                // z / (z - zs)
+                float scaleFactor = zlinearized / (zlinearized - zslinearized);
+
+
+                float left =   (ndcNextFragmentLightmapTexel.x - ndcCurrentFragmentLightmapTexel.x - halfTexelSize) * thisSampleZPlaneSize * scaleFactor * lightSizeScale;
+                float right =  (ndcNextFragmentLightmapTexel.x - ndcCurrentFragmentLightmapTexel.x + halfTexelSize) * thisSampleZPlaneSize * scaleFactor * lightSizeScale;
+                float top =    (ndcNextFragmentLightmapTexel.y - ndcCurrentFragmentLightmapTexel.y + halfTexelSize) * thisSampleZPlaneSize * scaleFactor * lightSizeScale;
+                float bottom = (ndcNextFragmentLightmapTexel.y - ndcCurrentFragmentLightmapTexel.y - halfTexelSize) * thisSampleZPlaneSize * scaleFactor * lightSizeScale;
+
+
+
+                // if(i == 0 && j == 0)
+                // if(FragPos.x > -2.9 && FragPos.x < -2.7)
+                // if(FragPos.z > -3.4 && FragPos.z < -3.2) {
+                //     if(zlinearized > debug) {
+                //         gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+                //         return 1.0;
+                //     }    
+                // }
+
+
+                left   = clamp(left,   -0.5, +0.5);
+                right  = clamp(right,  -0.5, +0.5);
+                top    = clamp(top,    -0.5, +0.5);
+                bottom = clamp(bottom, -0.5, +0.5);
+
+
+
+                /* Neighbor calculations and gap filling */
+                /* Neighbor calculations and gap filling */
+                /* Neighbor calculations and gap filling */
+                /* Neighbor calculations and gap filling */
+                
+                
+                vec2 sampleCoords1 = vec2(sampleTexX - (oneTexelSize * searchTexelSpread), sampleTexY);
+                float zs1 = texture2D(lightmap, sampleCoords1).r * 2.0 - 1.0;
+                float zslinearized1 = ((2.0 * near_plane * far_plane) / (far_plane + near_plane - zs1 * (far_plane - near_plane))) / far_plane;
+
+                // if is an occluder
+                if(zslinearized1 < zlinearized) {
+                    // // (fw / r ) * zs
+                    // float thisSampleZPlaneTexelSize = oneFarPlaneTexelSize * zslinearized;                
+                    float thisSampleZPlaneTexelSize = lightmapFarPlaneSize * zslinearized1;
+
+                    vec2 ndcNextFragmentLightmapTexel = sampleCoords1 * 2.0 - 1.0;
+                    // z / (z - zs)
+                    float scaleFactor = zlinearized / (zlinearized - zslinearized1);
+
+                    float left1 = (ndcNextFragmentLightmapTexel.x - ndcCurrentFragmentLightmapTexel.x - halfTexelSize)   * thisSampleZPlaneTexelSize * scaleFactor * lightSizeScale;
+                    left1   = clamp(left1,   -0.5, +0.5);
+                    left = min(left1, left);
+                }
+
+                
+                vec2 sampleCoords2 = vec2(sampleTexX, sampleTexY - (oneTexelSize * searchTexelSpread));
+                float zs2 = texture2D(lightmap, sampleCoords2).r * 2.0 - 1.0;
+                float zslinearized2 = ((2.0 * near_plane * far_plane) / (far_plane + near_plane - zs2 * (far_plane - near_plane))) / far_plane;
+
+                // not an occluder
+                if(zslinearized2 < zlinearized) {
+                    // // (fw / r ) * zs
+                    // float thisSampleZPlaneTexelSize = oneFarPlaneTexelSize * zslinearized2;
+                    float thisSampleZPlaneTexelSize = lightmapFarPlaneSize * zslinearized1;
+
+                    vec2 ndcNextFragmentLightmapTexel = sampleCoords2 * 2.0 - 1.0;
+                    // z / (z - zs)
+                    float scaleFactor = zlinearized / (zlinearized - zslinearized2);
+
+                    float bottom1 = (ndcNextFragmentLightmapTexel.y - ndcCurrentFragmentLightmapTexel.y - halfTexelSize) * thisSampleZPlaneTexelSize * scaleFactor * lightSizeScale;
+                    bottom1   = clamp(bottom1,   -0.5, +0.5);
+                    bottom = min(bottom1, bottom);
+                }
+
+
+                /* Neighbor calculations and gap filling - END */
+                /* Neighbor calculations and gap filling - END */
+                /* Neighbor calculations and gap filling - END */
+                /* Neighbor calculations and gap filling - END */
+
+
+
+                float width  = right - left;
+                float height = top - bottom;
+             
+                float area = width * height;
+
+
+                visibility -= area * 1.0;
+            }
+
+            if( visibility < 0.0 ) visibility = 0.0;
+
+            return visibility;
+
+
+
+
+
+            // float bias = max(0.05 * (1.0 - dot(Normal, lightDir)), 0.001);  
+            // float currentDepth = lNDC.z - bias;     
+            // // the further a point is, the brightest is going to be in the texture
+            // // white points are at the maximum z-value of our projection  
+            // float closestDepth = texture2D(lightmap, lNDC.xy).r;
+
+            // return currentDepth < closestDepth  ? 1.0 : 0.0;  
+        }
+
+        void main() {
+            vec3 normal = normalize(Normal);
+            vec3 lightDir = normalize(lightPos - FragPos);
+            float diffuse = max(dot(normal, lightDir), 0.0);
+            diffuse += 0.2;
+
+
+            diffuse *= ShadowCalculation(FragPosLightSpaceNC, lightDir, normal);
+
+
+            gl_FragColor  = vec4(diffuse, diffuse, diffuse, 1.0);
+
+            // if(FragPos.x > -2.9 && FragPos.x < -2.7)
+            // if(FragPos.z > -3.4 && FragPos.z < -3.2)
+            //     gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+
+            // gl_FragColor  = vec4(1.0);
+        }
+    </script>
+
+
+
+
+    <script type="vert" id="lightmapv">
+        attribute vec3 pos;
+        attribute vec3 normal;
+
+        uniform mat4 projection;
+        uniform mat4 model;
+        uniform mat4 view;
+
+        varying vec3 Normal;
+        varying vec3 FragPos;
+
+        void main() {
+            gl_Position = projection * view * model * vec4(pos, 1.0);
+            Normal = normalize((model * vec4(normal, 0.0)).xyz);
+            FragPos = pos;
+        }
+    </script>
+
+    <script type="frag" id="lightmapf">
+        precision highp float;
+
+        varying vec3 Normal;
+        varying vec3 FragPos;
+
+        void main() {
+            vec3 lightDir = normalize(vec3(3.0, 8.0, 5.0) - FragPos);
+            float diffuse = max(dot(normalize(Normal), lightDir), 0.0);
+            diffuse += 0.2;
+            gl_FragColor  = vec4(diffuse, diffuse, diffuse, 1.0);
+            // gl_FragColor  = vec4(1.0);
+        }
+    </script>
+
+
+
+
+    <!--   POST PROCESS ROUTINE  -->
+    <script type="vert" id="postprocvert">
+    	attribute vec2  pos;
+    	attribute vec2  coord;
+
+    	varying vec2  Coord;
+    	void main() 
+    	{
+    		gl_Position = vec4(pos.xy, 0.0, 1.0);
+    		Coord = coord;
+    	}
+    </script>
+
+    <script type="frag" id="postprocfrag">
+    	precision mediump float;
+
+    	varying vec2  Coord;
+
+    	uniform sampler2D texture;
+
+        const float near_plane = 15.0;
+        const float far_plane = 100.0;
+
+
+        float LinearizeDepth(float depth)
+        {
+            float z = depth * 2.0 - 1.0; // Back to NDC 
+            return (2.0 * near_plane * far_plane) / (far_plane + near_plane - z * (far_plane - near_plane));
+        }
+
+
+        /*
+        
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+            I WAS LINEARIZING THE DEPTH THE WRONG WAY !!!
+        
+        */
+
+    	void main() 
+    	{
+    		vec4 col     = texture2D(texture, Coord);
+    		gl_FragColor = vec4(vec3(LinearizeDepth(col.x) / far_plane), 1.0);
+            /* IT DIVIDES AGAINST FAR PLANE ANOTHER TIME !!!! AND Z MUST BE IN NDC */
+
+
+
+    		// gl_FragColor = vec4(vec3(col.x), 1.0);
+    	}
+    </script>
+    <!--   POST PROCESS ROUTINE - END  -->
+
+
+
+
+
+
+    <style>
+        * {
+            margin: 0;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="canvas"></canvas>
+
+</body>
+</html>
